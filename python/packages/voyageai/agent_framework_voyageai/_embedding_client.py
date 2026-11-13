@@ -146,8 +146,7 @@ def _error_detail(ex: voyageai.error.VoyageError) -> str:
     body: Any = getattr(ex, "json_body", None)
     detail: Any = cast("dict[str, Any]", body).get("detail") if isinstance(body, dict) else None
     if not isinstance(detail, str):
-        user_message: str | None = getattr(ex, "user_message", None)
-        detail = user_message or str(ex)
+        detail = str(getattr(ex, "user_message", None) or ex)
     return detail[:_MAX_ERROR_DETAIL_CHARS]
 
 
@@ -157,7 +156,7 @@ def _validate_model_and_dimensions(model: str, dimensions: int | None) -> None:
         raise ValueError(
             f"Unsupported Voyage AI embedding model {model!r}. Supported models: {', '.join(_MODEL_DIMENSIONS)}."
         )
-    if dimensions is not None and dimensions not in supported:
+    if dimensions is not None and (type(dimensions) is not int or dimensions not in supported):
         raise ValueError(f"Model {model!r} supports dimensions {list(supported)}, not {dimensions!r}.")
 
 
@@ -222,7 +221,7 @@ class RawVoyageAIEmbeddingClient(
 
         if client is None:
             key = settings.get("api_key")
-            if key is None:
+            if key is None or not key.get_secret_value().strip():
                 raise ValueError(
                     "A Voyage AI API key is required. Set VOYAGE_API_KEY, pass api_key, "
                     "or supply a pre-configured client."
@@ -282,8 +281,12 @@ class RawVoyageAIEmbeddingClient(
             response = await self.client.embed(list(values), model=model, **kwargs)
         except voyageai.error.VoyageError as ex:
             self._raise_sdk_error(ex)
-        except IntegrationException:
-            raise
+        except (AttributeError, KeyError, TypeError) as ex:
+            # The SDK reads the usage and vectors out of the body while building its result. A body without
+            # them, including one with no token count, surfaces here as a lookup or type error.
+            raise IntegrationInvalidResponseException(
+                f"Voyage AI embeddings response was invalid: {ex!r}", inner_exception=ex
+            ) from ex
         except Exception as ex:
             raise IntegrationException(f"Voyage AI embeddings request failed: {ex}", inner_exception=ex) from ex
 
@@ -298,10 +301,9 @@ class RawVoyageAIEmbeddingClient(
                     raise ValueError(f"unexpected embedding length {len(vector)}")
                 embeddings.append(Embedding(vector=vector, dimensions=len(vector), model=model))
 
-            # Billing fails closed: a response without a token count is an error, never zero tokens.
-            total_tokens: Any = getattr(response, "total_tokens", None)
-            if isinstance(total_tokens, bool) or not isinstance(total_tokens, int) or total_tokens < 0:
-                raise ValueError("response did not report a valid token count")
+            # The SDK sums the reported token counts and fails on a response without one, so billing
+            # never falls back to zero tokens.
+            total_tokens = response.total_tokens
             return embeddings, {"input_token_count": total_tokens, "total_token_count": total_tokens}
         except Exception as ex:
             raise IntegrationInvalidResponseException(

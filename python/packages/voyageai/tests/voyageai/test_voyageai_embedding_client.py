@@ -1,11 +1,11 @@
 # Copyright (c) Microsoft. All rights reserved.
 
 import os
-from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+import voyageai
 import voyageai.error
 from agent_framework.exceptions import (
     IntegrationException,
@@ -14,7 +14,9 @@ from agent_framework.exceptions import (
     IntegrationInvalidResponseException,
     SettingNotFoundError,
 )
+from voyageai.api_resources import VoyageResponse
 from voyageai.client_async import AsyncClient
+from voyageai.object import EmbeddingsObject
 
 from agent_framework_voyageai import RawVoyageAIEmbeddingClient, VoyageAIEmbeddingClient
 from agent_framework_voyageai._embedding_client import MAX_BATCH_SIZE  # pyright: ignore[reportPrivateUsage]
@@ -34,12 +36,19 @@ def _clear_voyage_env(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
         monkeypatch.delenv(name, raising=False)
 
 
-def make_response(vectors: list[list[float]], total_tokens: int | None = 4) -> Any:
-    """Shape of ``voyageai.object.EmbeddingsObject``; ``None`` leaves the token count off."""
-    response = SimpleNamespace(embeddings=vectors)
-    if total_tokens is not None:
-        response.total_tokens = total_tokens
-    return response
+def make_body(vectors: list[list[float]], usage: Any = None) -> dict[str, Any]:
+    """The JSON body of ``POST /v1/embeddings``."""
+    return {
+        "object": "list",
+        "model": "voyage-4",
+        "data": [{"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(vectors)],
+        "usage": {"total_tokens": 4} if usage is None else usage,
+    }
+
+
+def make_response(vectors: list[list[float]], total_tokens: int = 4) -> EmbeddingsObject:
+    """What ``AsyncClient.embed`` returns for a well-formed body."""
+    return EmbeddingsObject(VoyageResponse.construct_from(make_body(vectors, {"total_tokens": total_tokens})))
 
 
 def make_client(*responses: Any, model: str | None = "voyage-4") -> tuple[VoyageAIEmbeddingClient, AsyncMock]:
@@ -82,6 +91,12 @@ def test_api_key_is_required_without_a_client() -> None:
         VoyageAIEmbeddingClient(model="voyage-4")
 
 
+@pytest.mark.parametrize("api_key", ["", "  "])
+def test_blank_api_key_is_rejected(api_key: str) -> None:
+    with pytest.raises(ValueError, match="VOYAGE_API_KEY"):
+        VoyageAIEmbeddingClient(model="voyage-4", api_key=api_key)
+
+
 def test_client_must_be_a_voyage_client() -> None:
     with pytest.raises(TypeError, match="AsyncClient"):
         VoyageAIEmbeddingClient(model="voyage-4", client=cast(Any, object()))
@@ -100,6 +115,14 @@ async def test_unsupported_dimensions_are_rejected_before_any_request(model: str
     client, sdk = make_client(model=model)
     with pytest.raises(ValueError, match="supports dimensions"):
         await client.get_embeddings(["a"], options={"dimensions": dimensions})
+    sdk.embed.assert_not_awaited()
+
+
+@pytest.mark.parametrize("dimensions", [1024.0, True])
+async def test_dimensions_must_be_an_integer(dimensions: Any) -> None:
+    client, sdk = make_client()
+    with pytest.raises(ValueError, match="supports dimensions"):
+        await client.get_embeddings(["a"], options=cast(Any, {"dimensions": dimensions}))
     sdk.embed.assert_not_awaited()
 
 
@@ -158,16 +181,27 @@ async def test_inputs_over_the_request_limit_are_split_in_order_and_usage_is_sum
 # region: the response is checked, and billing fails closed
 
 
-async def test_missing_token_count_fails_instead_of_reporting_zero_tokens() -> None:
-    client, _ = make_client(make_response([[0.1, 0.2]], total_tokens=None))
-    with pytest.raises(IntegrationInvalidResponseException, match="token count"):
-        await client.get_embeddings(["a"])
+@pytest.mark.parametrize(
+    "usage_body",
+    [
+        pytest.param({"drop_usage": True}, id="no-usage"),
+        pytest.param({}, id="empty-usage"),
+        pytest.param({"total_tokens": None}, id="null-total-tokens"),
+    ],
+)
+async def test_response_without_a_token_count_fails_instead_of_reporting_zero_tokens(
+    monkeypatch: pytest.MonkeyPatch, usage_body: dict[str, Any]
+) -> None:
+    body = make_body([[0.1, 0.2]])
+    if usage_body.get("drop_usage"):
+        del body["usage"]
+    else:
+        body["usage"] = usage_body
+    # Run the SDK's own response handling, which is where the token count is read.
+    monkeypatch.setattr(voyageai.Embedding, "acreate", AsyncMock(return_value=VoyageResponse.construct_from(body)))
+    client = VoyageAIEmbeddingClient(model="voyage-4", client=AsyncClient(api_key="test-key"))
 
-
-@pytest.mark.parametrize("total_tokens", [-1, "4", True, 1.5])
-async def test_invalid_token_count_fails(total_tokens: Any) -> None:
-    client, _ = make_client(make_response([[0.1, 0.2]], total_tokens=total_tokens))
-    with pytest.raises(IntegrationInvalidResponseException, match="token count"):
+    with pytest.raises(IntegrationInvalidResponseException):
         await client.get_embeddings(["a"])
 
 
@@ -238,6 +272,15 @@ async def test_error_without_a_detail_body_falls_back_to_the_sdk_message() -> No
         await client.get_embeddings(["a"])
 
 
+async def test_non_text_detail_does_not_escape_as_a_type_error() -> None:
+    client, sdk = make_client()
+    sdk.embed.side_effect = voyageai.error.InvalidRequestError(
+        "sdk message", http_status=422, json_body={"detail": [{"msg": "field required"}]}
+    )
+    with pytest.raises(IntegrationInvalidRequestException, match="sdk message"):
+        await client.get_embeddings(["a"])
+
+
 async def test_unexpected_sdk_failure_is_wrapped() -> None:
     client, sdk = make_client()
     sdk.embed.side_effect = RuntimeError("connection reset")
@@ -255,12 +298,14 @@ async def test_unexpected_sdk_failure_is_wrapped() -> None:
 async def test_integration_embeds_with_requested_dimensions() -> None:
     client = VoyageAIEmbeddingClient(model="voyage-4-lite")
 
-    result = await client.get_embeddings(["hello"], options={"dimensions": 256, "input_type": "query"})
+    result = await client.get_embeddings(
+        ["Voyage AI provides embedding models."], options={"dimensions": 256, "input_type": "document"}
+    )
 
     assert len(result) == 1
     assert result[0].dimensions == 256
     assert result.usage is not None
-    assert (result.usage.get("total_token_count") or 0) >= 0
+    assert (result.usage.get("total_token_count") or 0) > 0
 
 
 # endregion
