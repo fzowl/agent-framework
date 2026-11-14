@@ -139,6 +139,13 @@ async def test_pre_chunked_documents_are_rejected_before_any_request() -> None:
     sdk.contextualized_embed.assert_not_awaited()
 
 
+async def test_a_bare_string_is_not_a_list_of_documents() -> None:
+    client, sdk = make_client()
+    with pytest.raises(ValueError, match="not a single string"):
+        await client.get_contextualized_embeddings(cast(Any, "one document"), options={"input_type": "document"})
+    sdk.contextualized_embed.assert_not_awaited()
+
+
 async def test_documents_are_sent_flat_with_auto_chunking_at_32000() -> None:
     client, sdk = make_client(make_response([[[0.1, 0.2]], [[0.3, 0.4]]]))
 

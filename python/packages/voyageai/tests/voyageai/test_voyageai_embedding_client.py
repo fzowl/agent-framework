@@ -185,6 +185,17 @@ async def test_requests_stay_within_the_models_token_ceiling() -> None:
     assert [len(call.args[0]) for call in sdk.embed.await_args_list] == [2, 1]
 
 
+async def test_text_that_expands_when_tokenized_is_counted_by_the_tokenizer() -> None:
+    # U+0344 is two characters after Unicode normalization, so 50 KB of it tokenizes to well over 50K tokens.
+    client, sdk = make_client(make_response([[0.1]]), make_response([[0.1]]), model="voyage-4-large")
+    sdk.tokenize.return_value = [[0] * 75_000, [0] * 75_000]
+
+    await client.get_embeddings(["\u0344" * 25_000, "\u0344" * 25_000])
+
+    sdk.tokenize.assert_called_once()
+    assert [len(call.args[0]) for call in sdk.embed.await_args_list] == [1, 1]
+
+
 async def test_input_over_the_ceiling_on_its_own_gets_its_own_request() -> None:
     client, sdk = make_client(make_response([[0.1]]), make_response([[0.1]]), model="voyage-4-large")
     sdk.tokenize.return_value = [[0] * 130_000, [0] * 10]
@@ -318,6 +329,13 @@ async def test_non_text_detail_does_not_escape_as_a_type_error() -> None:
         "sdk message", http_status=422, json_body={"detail": [{"msg": "field required"}]}
     )
     with pytest.raises(IntegrationInvalidRequestException, match="sdk message"):
+        await client.get_embeddings(["a"])
+
+
+async def test_sdk_error_without_a_status_for_an_inconsistent_body_is_an_invalid_response() -> None:
+    client, sdk = make_client()
+    sdk.embed.side_effect = voyageai.error.ServerError("body was inconsistent")
+    with pytest.raises(IntegrationInvalidResponseException, match="body was inconsistent"):
         await client.get_embeddings(["a"])
 
 

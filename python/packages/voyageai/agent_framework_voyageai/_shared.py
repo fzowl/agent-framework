@@ -26,9 +26,11 @@ MAX_BATCH_SIZE: Final = 1000
 MATRYOSHKA_DIMENSIONS: Final = (256, 512, 1024, 2048)
 INPUT_TYPES: Final = ("document", "query")
 
-# Voyage AI tokenizers produced at most one token per UTF-8 byte of text in our checks, plus a couple
-# of special tokens per input. This bound adds room, and lets a request that is far below its token
-# ceiling skip the tokenizer, which is downloaded from the Hugging Face Hub on first use.
+# The Voyage AI tokenizers normalize text to NFC and then emit at most one token per byte. NFC can grow
+# UTF-8 text by up to three times (for example U+0344 becomes two characters), so three tokens per byte,
+# plus a few special tokens per input, bounds what a text can tokenize to. A request below its token
+# ceiling by this bound skips the tokenizer, which is downloaded from the Hugging Face Hub on first use.
+_MAX_TOKENS_PER_BYTE: Final = 3
 _TOKENS_PER_INPUT_OVERHEAD: Final = 8
 
 
@@ -51,7 +53,8 @@ def raise_sdk_error(ex: voyageai.error.VoyageError, operation: str) -> NoReturn:
     everything else, including ``429`` and ``5xx``, is a plain integration failure.
     """
     status: int | None = getattr(ex, "http_status", None)
-    if status is not None and status < 400:
+    # The SDK raises a ServerError without a status when the body it received is inconsistent.
+    if (status is not None and status < 400) or (status is None and isinstance(ex, voyageai.error.ServerError)):
         raise IntegrationInvalidResponseException(
             f"Voyage AI {operation} response was invalid: {error_detail(ex)}",
             inner_exception=ex,
@@ -105,7 +108,8 @@ async def split_into_requests(
             unsplit in that case.
     """
     if max_request_tokens is None or (
-        sum(len(value.encode("utf-8")) + _TOKENS_PER_INPUT_OVERHEAD for value in values) <= max_request_tokens
+        sum(_MAX_TOKENS_PER_BYTE * len(value.encode("utf-8")) + _TOKENS_PER_INPUT_OVERHEAD for value in values)
+        <= max_request_tokens
     ):
         return [values[start : start + MAX_BATCH_SIZE] for start in range(0, len(values), MAX_BATCH_SIZE)]
 

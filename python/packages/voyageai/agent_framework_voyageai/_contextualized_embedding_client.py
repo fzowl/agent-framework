@@ -305,6 +305,8 @@ class VoyageAIContextualizedEmbeddingClient:
                 "Voyage AI chunks documents only with input_type='document'."
             )
         validate_input_type(input_type)
+        if isinstance(values, str):
+            raise ValueError("values must be a sequence of strings, not a single string; wrap one document in a list.")
         for index, value in enumerate(values):
             if not isinstance(value, str):
                 raise ValueError(

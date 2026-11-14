@@ -7,7 +7,7 @@ Integration with Voyage AI for text embedding generation and contextualized chun
 - Uses the official `voyageai` SDK (`voyageai.AsyncClient.embed`) for embedding requests. Framework
   option, usage, and exception translation stays in this package.
 - There is no default model. `model` (or `VOYAGE_EMBEDDING_MODEL`, or `options["model"]`) must name a
-  model in `_MODEL_DIMENSIONS`; an unknown name raises `ValueError` before any request. The table also
+  model in `_MODELS`; an unknown name raises `ValueError` before any request. The table also
   keeps the SDK's local open-weight models from being selected, since those would run in-process.
 - `dimensions` is validated against the model's supported sizes and sent as `output_dimension` only when
   set. `input_type` (`"document"`/`"query"`) and `truncation` are sent only when set.
@@ -15,7 +15,8 @@ Integration with Voyage AI for text embedding generation and contextualized chun
   `_ModelSpec.max_request_tokens` (`None` for `voyage-code-4`: no ceiling is documented, so none is assumed).
   `split_into_requests` splits larger calls into consecutive requests and `get_embeddings` sums usage. Tokens
   are counted with the SDK tokenizer (`client.tokenize`, fetched from the Hugging Face Hub on first use) only
-  when the inputs could reach the ceiling by their UTF-8 size; a tokenizer failure raises instead of sending an
+  when the inputs could reach the ceiling by their UTF-8 size (the bound is 3 tokens per byte, because NFC
+  normalization can expand text); a tokenizer failure raises instead of sending an
   unsplit request.
 - Contextualized embeddings do not fit `BaseEmbeddingClient` (several vectors per input), so
   `VoyageAIContextualizedEmbeddingClient.get_contextualized_embeddings` has its own result type
@@ -25,8 +26,8 @@ Integration with Voyage AI for text embedding generation and contextualized chun
   other input type or with pre-chunked inner lists. Queries are sent as `[[query], ...]` without chunking.
 - Usage is read from the response's `usage.total_tokens`. A missing or invalid count raises
   `IntegrationInvalidResponseException`; it is never reported as zero.
-- Voyage AI error bodies are `{"detail": "<text>"}`. `_error_detail` reads that field and
-  `_raise_sdk_error` maps `401`/`403` to `IntegrationInvalidAuthException`, other `4xx` except `429` to
+- Voyage AI error bodies are `{"detail": "<text>"}`. `_shared.error_detail` reads that field and
+  `_shared.raise_sdk_error` maps `401`/`403` to `IntegrationInvalidAuthException`, other `4xx` except `429` to
   `IntegrationInvalidRequestException`, and everything else (including `429` and `5xx`) to
   `IntegrationException`.
 - The SDK retries `429`/`503`/timeouts only when `max_retries` is set. The client keeps the SDK default (no
