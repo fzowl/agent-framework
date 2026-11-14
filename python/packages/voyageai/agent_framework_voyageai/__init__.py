@@ -2,6 +2,13 @@
 
 import importlib.metadata
 
+from ._contextualized_embedding_client import (
+    VoyageAIContextualizedEmbedding,
+    VoyageAIContextualizedEmbeddingClient,
+    VoyageAIContextualizedEmbeddingOptions,
+    VoyageAIContextualizedEmbeddings,
+    VoyageAIContextualizedEmbeddingSettings,
+)
 from ._embedding_client import (
     RawVoyageAIEmbeddingClient,
     VoyageAIEmbeddingClient,
@@ -16,6 +23,11 @@ except importlib.metadata.PackageNotFoundError:
 
 __all__ = [
     "RawVoyageAIEmbeddingClient",
+    "VoyageAIContextualizedEmbedding",
+    "VoyageAIContextualizedEmbeddingClient",
+    "VoyageAIContextualizedEmbeddingOptions",
+    "VoyageAIContextualizedEmbeddingSettings",
+    "VoyageAIContextualizedEmbeddings",
     "VoyageAIEmbeddingClient",
     "VoyageAIEmbeddingOptions",
     "VoyageAIEmbeddingSettings",

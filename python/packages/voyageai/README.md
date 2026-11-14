@@ -12,7 +12,8 @@ See the [Voyage AI samples](samples/README.md) for a runnable example.
 
 ## Embedding Client
 
-The `VoyageAIEmbeddingClient` generates text embeddings with the official
+The `VoyageAIEmbeddingClient` generates text embeddings, and `VoyageAIContextualizedEmbeddingClient` generates
+contextualized chunk embeddings, with the official
 [`voyageai`](https://pypi.org/project/voyageai/) SDK.
 
 ### Quick Start
@@ -72,12 +73,54 @@ results = await collection.search("How do I call a model?", embeddings_options={
 
 ### Requests and usage
 
-Voyage AI accepts at most 1000 inputs per request, so the client sends larger calls as consecutive requests,
-returns the vectors in order, and sums usage. The service also caps the tokens in one request per model and
-answers an over-limit request with `400`, which surfaces as `IntegrationInvalidRequestException`.
+A request holds at most 1000 inputs, and each model has a documented ceiling on the tokens of one request
+(1M for `voyage-4-lite` and `voyage-3.5-lite`, 320K for `voyage-4` and `voyage-3.5`, 120K for the others;
+none is documented for `voyage-code-4`, so only the input count is limited there). The client splits larger calls
+into consecutive requests within both limits, returns the vectors in order, and sums usage.
+
+Tokens are counted with the model's tokenizer through the SDK. The tokenizer is downloaded from the Hugging
+Face Hub on first use, and only when the inputs could reach the ceiling: a call that is far below it never
+loads one. If the tokenizer is needed and cannot be loaded, the call raises `IntegrationException` instead of
+sending an unsplit request.
 
 Usage comes from the token count the service reports. A response without one raises
 `IntegrationInvalidResponseException` instead of reporting zero tokens.
 
 Only the models in the table above are accepted. The `voyageai` SDK can also run some open-weight models
 on the local machine, and the client does not select them.
+
+## Contextualized Embedding Client
+
+Contextualized embeddings give each chunk of a document a vector that also reflects the rest of the document.
+One document yields several vectors, which does not fit `get_embeddings` (one vector per input), so
+`VoyageAIContextualizedEmbeddingClient` has its own method and result type. It has no telemetry layer.
+
+```python
+from agent_framework_voyageai import VoyageAIContextualizedEmbeddingClient
+
+# The model is always named explicitly: pass it here, or set VOYAGE_CONTEXTUALIZED_EMBEDDING_MODEL.
+client = VoyageAIContextualizedEmbeddingClient(model="voyage-context-4")
+
+documents = await client.get_contextualized_embeddings(
+    ["A long document ...", "Another long document ..."],
+    options={"input_type": "document", "dimensions": 512},
+)
+for document in documents:
+    for chunk, embedding in zip(document.chunks or [], document.embeddings):
+        print(chunk[:40], embedding.dimensions)
+
+queries = await client.get_contextualized_embeddings(["Why do cats purr?"], options={"input_type": "query"})
+```
+
+| Model | `dimensions` |
+|---|---|
+| `voyage-context-4`, `voyage-context-3` | 256, 512, 1024 (default), 2048 |
+
+- `input_type` is required. `"document"` sends each value as one whole document (a flat list of strings, one
+  string per document) with `enable_auto_chunking=True` and `chunk_size=32_000`, so Voyage AI does the
+  chunking. A pre-chunked document, such as a list of strings as one value, raises `ValueError`: the service
+  rejects it when it chunks itself. `"query"` sends each value as one query and does not chunk.
+- Each result holds one vector per chunk in `embeddings`, and the text of each chunk in `chunks` when the service
+  returned it. Queries have one vector and `chunks` is `None`.
+- Requests are split by the 1000-input and 120K-token limits like the text client, and the same fail-closed
+  usage and error mapping apply.

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import importlib.metadata
 import logging
 import sys
-from collections.abc import Iterator, Mapping, Sequence
-from typing import Any, ClassVar, Final, Generic, Literal, NoReturn, TypedDict, cast
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, ClassVar, Final, Generic, Literal, TypedDict
 
 import voyageai.error
 from agent_framework import (
@@ -20,16 +20,21 @@ from agent_framework import (
 )
 from agent_framework._settings import SecretString
 from agent_framework._telemetry import mark_feature_used
-from agent_framework.exceptions import (
-    IntegrationException,
-    IntegrationInvalidAuthException,
-    IntegrationInvalidRequestException,
-    IntegrationInvalidResponseException,
-)
+from agent_framework.exceptions import IntegrationException
 from agent_framework.observability import EmbeddingTelemetryLayer
 from voyageai.client_async import AsyncClient
 
 from ._feature_usage import FeatureIndex
+from ._shared import (
+    MATRYOSHKA_DIMENSIONS,
+    VOYAGEAI_API_BASE_URL,
+    create_sdk_client,
+    invalid_response,
+    raise_sdk_error,
+    split_into_requests,
+    validate_dimensions,
+    validate_input_type,
+)
 
 if sys.version_info >= (3, 13):
     from typing import TypeVar  # pragma: no cover
@@ -45,42 +50,36 @@ __all__ = [
 
 logger = logging.getLogger("agent_framework.voyageai")
 
-_VOYAGEAI_API_BASE_URL = "https://api.voyageai.com/v1"
-_DEFAULT_TIMEOUT_SECONDS = 60.0
-_MAX_ERROR_DETAIL_CHARS = 2000
 
-MAX_BATCH_SIZE: Final = 1000
-"""The most inputs Voyage AI accepts in one embeddings request."""
+@dataclass(frozen=True)
+class _ModelSpec:
+    dimensions: tuple[int, ...]
+    max_request_tokens: int | None
+    """The documented ceiling on the tokens of one request, or ``None`` when Voyage AI documents none."""
 
-_MATRYOSHKA_DIMENSIONS: Final = (256, 512, 1024, 2048)
+
 _FIXED_DIMENSIONS: Final = (1024,)
 
-_MODEL_DIMENSIONS: Final[Mapping[str, tuple[int, ...]]] = {
-    "voyage-4-large": _MATRYOSHKA_DIMENSIONS,
-    "voyage-4": _MATRYOSHKA_DIMENSIONS,
-    "voyage-4-lite": _MATRYOSHKA_DIMENSIONS,
-    "voyage-code-4": _MATRYOSHKA_DIMENSIONS,
-    "voyage-3-large": _MATRYOSHKA_DIMENSIONS,
-    "voyage-3.5": _MATRYOSHKA_DIMENSIONS,
-    "voyage-3.5-lite": _MATRYOSHKA_DIMENSIONS,
-    "voyage-code-3": _MATRYOSHKA_DIMENSIONS,
-    "voyage-finance-2": _FIXED_DIMENSIONS,
-    "voyage-law-2": _FIXED_DIMENSIONS,
+_MODELS: Final[Mapping[str, _ModelSpec]] = {
+    "voyage-4-large": _ModelSpec(MATRYOSHKA_DIMENSIONS, 120_000),
+    "voyage-4": _ModelSpec(MATRYOSHKA_DIMENSIONS, 320_000),
+    "voyage-4-lite": _ModelSpec(MATRYOSHKA_DIMENSIONS, 1_000_000),
+    # No per-request token ceiling is documented for voyage-code-4, so none is assumed.
+    "voyage-code-4": _ModelSpec(MATRYOSHKA_DIMENSIONS, None),
+    "voyage-3-large": _ModelSpec(MATRYOSHKA_DIMENSIONS, 120_000),
+    "voyage-3.5": _ModelSpec(MATRYOSHKA_DIMENSIONS, 320_000),
+    "voyage-3.5-lite": _ModelSpec(MATRYOSHKA_DIMENSIONS, 1_000_000),
+    "voyage-code-3": _ModelSpec(MATRYOSHKA_DIMENSIONS, 120_000),
+    "voyage-finance-2": _ModelSpec(_FIXED_DIMENSIONS, 120_000),
+    "voyage-law-2": _ModelSpec(_FIXED_DIMENSIONS, 120_000),
 }
-"""The text embedding models this client accepts, with the ``dimensions`` each one supports.
+"""The text embedding models this client accepts, with the ``dimensions`` each one supports and the
+ceiling Voyage AI documents for the tokens of one request.
 
 The model is always named by the caller; there is no default. A name outside this table is rejected
 before any request is sent. The Voyage AI SDK also runs some open-weight models locally, and this
 table keeps those from being selected by accident.
 """
-
-_INPUT_TYPES: Final = ("document", "query")
-
-
-def _batches(values: Sequence[str]) -> Iterator[Sequence[str]]:
-    """Split ``values`` into consecutive runs of at most ``MAX_BATCH_SIZE`` inputs."""
-    for start in range(0, len(values), MAX_BATCH_SIZE):
-        yield values[start : start + MAX_BATCH_SIZE]
 
 
 class VoyageAIEmbeddingOptions(EmbeddingGenerationOptions, total=False):
@@ -138,26 +137,12 @@ class VoyageAIEmbeddingSettings(TypedDict, total=False):
     base_url: str | None
 
 
-def _error_detail(ex: voyageai.error.VoyageError) -> str:
-    """Return the message of a Voyage AI error.
-
-    Voyage AI error bodies are ``{"detail": "<text>"}``. Anything else falls back to the SDK message.
-    """
-    body: Any = getattr(ex, "json_body", None)
-    detail: Any = cast("dict[str, Any]", body).get("detail") if isinstance(body, dict) else None
-    if not isinstance(detail, str):
-        detail = str(getattr(ex, "user_message", None) or ex)
-    return detail[:_MAX_ERROR_DETAIL_CHARS]
-
-
-def _validate_model_and_dimensions(model: str, dimensions: int | None) -> None:
-    supported = _MODEL_DIMENSIONS.get(model)
-    if supported is None:
-        raise ValueError(
-            f"Unsupported Voyage AI embedding model {model!r}. Supported models: {', '.join(_MODEL_DIMENSIONS)}."
-        )
-    if dimensions is not None and (type(dimensions) is not int or dimensions not in supported):
-        raise ValueError(f"Model {model!r} supports dimensions {list(supported)}, not {dimensions!r}.")
+def _model_spec(model: str, dimensions: Any) -> _ModelSpec:
+    spec = _MODELS.get(model)
+    if spec is None:
+        raise ValueError(f"Unsupported Voyage AI embedding model {model!r}. Supported models: {', '.join(_MODELS)}.")
+    validate_dimensions(model, dimensions, spec.dimensions)
+    return spec
 
 
 class RawVoyageAIEmbeddingClient(
@@ -215,7 +200,7 @@ class RawVoyageAIEmbeddingClient(
             env_file_encoding=env_file_encoding,
         )
         resolved_model: str = settings["embedding_model"]  # type: ignore[assignment]
-        _validate_model_and_dimensions(resolved_model, None)
+        _model_spec(resolved_model, None)
         self.model: str = resolved_model
         self.base_url: str | None = settings.get("base_url")
 
@@ -226,39 +211,14 @@ class RawVoyageAIEmbeddingClient(
                     "A Voyage AI API key is required. Set VOYAGE_API_KEY, pass api_key, "
                     "or supply a pre-configured client."
                 )
-            client = AsyncClient(
-                api_key=key.get_secret_value(),
-                timeout=_DEFAULT_TIMEOUT_SECONDS,
-                base_url=self.base_url,
-            )
-            try:
-                package_version = importlib.metadata.version("agent-framework-voyageai")
-            except importlib.metadata.PackageNotFoundError:
-                package_version = "0.0.0"
-            client.append_client_metadata("agent-framework-voyageai", package_version)
+            client = create_sdk_client(key.get_secret_value(), self.base_url)
         self.client = client
 
         super().__init__(additional_properties=additional_properties)
 
     def service_url(self) -> str:
         """Get the URL of the service."""
-        return self.base_url or _VOYAGEAI_API_BASE_URL
-
-    @staticmethod
-    def _raise_sdk_error(ex: voyageai.error.VoyageError) -> NoReturn:
-        status: int | None = getattr(ex, "http_status", None)
-        if status is not None and status < 400:
-            raise IntegrationInvalidResponseException(
-                f"Voyage AI embeddings response was invalid: {_error_detail(ex)}",
-                inner_exception=ex,
-            ) from ex
-
-        message = f"Voyage AI embeddings request failed with status {status}: {_error_detail(ex)}"
-        if isinstance(ex, voyageai.error.AuthenticationError) or status in (401, 403):
-            raise IntegrationInvalidAuthException(message) from ex
-        if status is not None and 400 <= status < 500 and status != 429:
-            raise IntegrationInvalidRequestException(message) from ex
-        raise IntegrationException(message, inner_exception=ex) from ex
+        return self.base_url or VOYAGEAI_API_BASE_URL
 
     async def _embed_batch(
         self,
@@ -280,13 +240,11 @@ class RawVoyageAIEmbeddingClient(
         try:
             response = await self.client.embed(list(values), model=model, **kwargs)
         except voyageai.error.VoyageError as ex:
-            self._raise_sdk_error(ex)
+            raise_sdk_error(ex, "embeddings")
         except (AttributeError, KeyError, TypeError) as ex:
             # The SDK reads the usage and vectors out of the body while building its result. A body without
             # them, including one with no token count, surfaces here as a lookup or type error.
-            raise IntegrationInvalidResponseException(
-                f"Voyage AI embeddings response was invalid: {ex!r}", inner_exception=ex
-            ) from ex
+            raise invalid_response(ex, "embeddings") from ex
         except Exception as ex:
             raise IntegrationException(f"Voyage AI embeddings request failed: {ex}", inner_exception=ex) from ex
 
@@ -306,10 +264,7 @@ class RawVoyageAIEmbeddingClient(
             total_tokens = response.total_tokens
             return embeddings, {"input_token_count": total_tokens, "total_token_count": total_tokens}
         except Exception as ex:
-            raise IntegrationInvalidResponseException(
-                f"Voyage AI embeddings response was invalid: {ex}",
-                inner_exception=ex,
-            ) from ex
+            raise invalid_response(ex, "embeddings") from ex
 
     async def get_embeddings(
         self,
@@ -319,9 +274,10 @@ class RawVoyageAIEmbeddingClient(
     ) -> GeneratedEmbeddings[list[float], VoyageAIEmbeddingOptionsT]:
         """Call the Voyage AI embeddings API.
 
-        Inputs beyond ``MAX_BATCH_SIZE`` are sent as consecutive requests. Vectors keep the order of
-        ``values``, usage is summed, and a failed request fails the whole call. Per-request token
-        ceilings are enforced by the service, which rejects an over-limit request with ``400``.
+        Inputs beyond ``MAX_BATCH_SIZE``, or beyond the model's documented per-request token ceiling,
+        are sent as consecutive requests. The tokens are counted with the model's tokenizer through the
+        SDK, which is downloaded on first use and only needed when the inputs could reach the ceiling.
+        Vectors keep the order of ``values``, usage is summed, and a failed request fails the whole call.
 
         Args:
             values: The text values to generate embeddings for.
@@ -336,7 +292,8 @@ class RawVoyageAIEmbeddingClient(
             IntegrationInvalidAuthException: If Voyage AI rejects the credentials.
             IntegrationInvalidRequestException: If Voyage AI rejects the request.
             IntegrationInvalidResponseException: If the response is malformed, or reports no token count.
-            IntegrationException: If the request fails for another reason, including rate limiting.
+            IntegrationException: If the request fails for another reason, including rate limiting, or
+                if the tokenizer needed to split a large call cannot be loaded.
         """
         if not values:
             return GeneratedEmbeddings([], options=options)
@@ -346,16 +303,16 @@ class RawVoyageAIEmbeddingClient(
         dimensions = opts.get("dimensions")
         input_type = opts.get("input_type")
         truncation = opts.get("truncation")
-        _validate_model_and_dimensions(model, dimensions)
-        if input_type is not None and input_type not in _INPUT_TYPES:
-            raise ValueError(f"Unsupported Voyage AI input_type {input_type!r}; use 'document' or 'query'.")
+        spec = _model_spec(model, dimensions)
+        validate_input_type(input_type)
         if truncation is not None and not isinstance(truncation, bool):
             raise ValueError(f"truncation must be a bool, not {truncation!r}.")
 
         mark_feature_used(FeatureIndex.VOYAGEAI)
         embeddings: list[Embedding[list[float]]] = []
         usage: UsageDetails | None = None
-        for batch in _batches(values):
+        requests = await split_into_requests(self.client, model, values, max_request_tokens=spec.max_request_tokens)
+        for batch in requests:
             batch_embeddings, batch_usage = await self._embed_batch(
                 batch, model=model, input_type=input_type, truncation=truncation, dimensions=dimensions
             )
