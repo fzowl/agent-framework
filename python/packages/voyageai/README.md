@@ -78,10 +78,10 @@ A request holds at most 1000 inputs, and each model has a documented ceiling on 
 none is documented for `voyage-code-4`, so only the input count is limited there). The client splits larger calls
 into consecutive requests within both limits, returns the vectors in order, and sums usage.
 
-Tokens are counted with the model's tokenizer through the SDK. The tokenizer is downloaded from the Hugging
-Face Hub on first use, and only when the inputs could reach the ceiling: a call that is far below it never
-loads one. If the tokenizer is needed and cannot be loaded, the call raises `IntegrationException` instead of
-sending an unsplit request.
+Tokens are counted with the SDK's `count_tokens`, which uses the model's own tokenizer. The tokenizer is
+downloaded from the Hugging Face Hub on first use. If tokens cannot be counted, the call raises
+`IntegrationException` instead of sending an unsplit request. `voyage-code-4` has no documented ceiling, so
+calls to it are split by input count only and never load a tokenizer.
 
 Usage comes from the token count the service reports. A response without one raises
 `IntegrationInvalidResponseException` instead of reporting zero tokens.

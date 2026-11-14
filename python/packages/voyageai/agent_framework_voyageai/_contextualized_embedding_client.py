@@ -292,7 +292,7 @@ class VoyageAIContextualizedEmbeddingClient:
             IntegrationInvalidRequestException: If Voyage AI rejects the request.
             IntegrationInvalidResponseException: If the response is malformed, or reports no token count.
             IntegrationException: If the request fails for another reason, including rate limiting, or
-                if the tokenizer needed to split a large call cannot be loaded.
+                if tokens cannot be counted to split the call.
         """
         opts: dict[str, Any] = options  # type: ignore[assignment]
         model = opts.get("model") or self.model

@@ -275,8 +275,8 @@ class RawVoyageAIEmbeddingClient(
         """Call the Voyage AI embeddings API.
 
         Inputs beyond ``MAX_BATCH_SIZE``, or beyond the model's documented per-request token ceiling,
-        are sent as consecutive requests. The tokens are counted with the model's tokenizer through the
-        SDK, which is downloaded on first use and only needed when the inputs could reach the ceiling.
+        are sent as consecutive requests. The tokens are counted with the SDK's ``count_tokens``, whose
+        tokenizer is downloaded on first use.
         Vectors keep the order of ``values``, usage is summed, and a failed request fails the whole call.
 
         Args:
@@ -293,7 +293,7 @@ class RawVoyageAIEmbeddingClient(
             IntegrationInvalidRequestException: If Voyage AI rejects the request.
             IntegrationInvalidResponseException: If the response is malformed, or reports no token count.
             IntegrationException: If the request fails for another reason, including rate limiting, or
-                if the tokenizer needed to split a large call cannot be loaded.
+                if tokens cannot be counted to split the call.
         """
         if not values:
             return GeneratedEmbeddings([], options=options)

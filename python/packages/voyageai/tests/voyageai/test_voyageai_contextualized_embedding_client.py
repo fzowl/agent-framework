@@ -61,6 +61,7 @@ def make_client(
     *responses: Any, model: str | None = "voyage-context-4"
 ) -> tuple[VoyageAIContextualizedEmbeddingClient, AsyncMock]:
     sdk = AsyncMock(spec=AsyncClient)
+    sdk.count_tokens.return_value = 1
     sdk.contextualized_embed.side_effect = list(responses)
     return VoyageAIContextualizedEmbeddingClient(model=model, client=sdk), sdk
 
@@ -243,7 +244,7 @@ async def test_requests_stay_within_the_token_ceiling_and_usage_is_summed() -> N
     client, sdk = make_client(
         make_response([[[0.1]], [[0.2]]], total_tokens=5), make_response([[[0.3]]], total_tokens=2)
     )
-    sdk.tokenize.return_value = [[0] * 50_000, [0] * 50_000, [0] * 50_000]
+    sdk.count_tokens.side_effect = [50_000, 50_000, 50_000]
 
     result = await client.get_contextualized_embeddings(["a" * 50_000] * 3, options={"input_type": "document"})
 

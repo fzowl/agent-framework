@@ -26,13 +26,6 @@ MAX_BATCH_SIZE: Final = 1000
 MATRYOSHKA_DIMENSIONS: Final = (256, 512, 1024, 2048)
 INPUT_TYPES: Final = ("document", "query")
 
-# The Voyage AI tokenizers normalize text to NFC and then emit at most one token per byte. NFC can grow
-# UTF-8 text by up to three times (for example U+0344 becomes two characters), so three tokens per byte,
-# plus a few special tokens per input, bounds what a text can tokenize to. A request below its token
-# ceiling by this bound skips the tokenizer, which is downloaded from the Hugging Face Hub on first use.
-_MAX_TOKENS_PER_BYTE: Final = 3
-_TOKENS_PER_INPUT_OVERHEAD: Final = 8
-
 
 def error_detail(ex: voyageai.error.VoyageError) -> str:
     """Return the message of a Voyage AI error.
@@ -99,26 +92,22 @@ async def split_into_requests(
     """Split ``values`` into consecutive requests within Voyage AI's per-request limits.
 
     A request holds at most ``MAX_BATCH_SIZE`` inputs and, for models with a documented ceiling,
-    at most ``max_request_tokens`` tokens in total. Tokens are counted with the model's own tokenizer
-    through the SDK, unless the inputs are small enough to be under the ceiling whatever they tokenize
-    to. An input over the ceiling on its own still gets its own request, and the service decides.
+    at most ``max_request_tokens`` tokens in total. Tokens are counted with the SDK's ``count_tokens``,
+    which uses the model's own tokenizer. An input over the ceiling on its own still gets its own
+    request, and the service decides.
 
     Raises:
-        IntegrationException: If the tokenizer is needed and cannot be loaded. Requests are never sent
-            unsplit in that case.
+        IntegrationException: If the tokens cannot be counted, for example because the tokenizer cannot be
+            loaded. Requests are never sent unsplit in that case.
     """
-    if max_request_tokens is None or (
-        sum(_MAX_TOKENS_PER_BYTE * len(value.encode("utf-8")) + _TOKENS_PER_INPUT_OVERHEAD for value in values)
-        <= max_request_tokens
-    ):
+    if max_request_tokens is None:
         return [values[start : start + MAX_BATCH_SIZE] for start in range(0, len(values), MAX_BATCH_SIZE)]
 
     try:
-        encodings = await asyncio.to_thread(client.tokenize, list(values), model)
-        token_counts = [len(encoding) for encoding in encodings]
+        token_counts = await asyncio.to_thread(lambda: [client.count_tokens([value], model) for value in values])
     except Exception as ex:
         raise IntegrationException(
-            f"Voyage AI request could not be split by token count: the tokenizer for {model!r} failed: {ex}",
+            f"Voyage AI request could not be split by token count: counting tokens for {model!r} failed: {ex}",
             inner_exception=ex,
         ) from ex
 

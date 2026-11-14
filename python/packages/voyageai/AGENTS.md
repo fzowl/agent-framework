@@ -14,10 +14,8 @@ Integration with Voyage AI for text embedding generation and contextualized chun
 - A request holds at most 1000 inputs (`MAX_BATCH_SIZE`) and, per model, at most the tokens in
   `_ModelSpec.max_request_tokens` (`None` for `voyage-code-4`: no ceiling is documented, so none is assumed).
   `split_into_requests` splits larger calls into consecutive requests and `get_embeddings` sums usage. Tokens
-  are counted with the SDK tokenizer (`client.tokenize`, fetched from the Hugging Face Hub on first use) only
-  when the inputs could reach the ceiling by their UTF-8 size (the bound is 3 tokens per byte, because NFC
-  normalization can expand text); a tokenizer failure raises instead of sending an
-  unsplit request.
+  are counted with the SDK's `client.count_tokens` (its tokenizer is fetched from the Hugging Face Hub on first
+  use); there is no estimation. A counting failure raises instead of sending an unsplit request.
 - Contextualized embeddings do not fit `BaseEmbeddingClient` (several vectors per input), so
   `VoyageAIContextualizedEmbeddingClient.get_contextualized_embeddings` has its own result type
   (`VoyageAIContextualizedEmbeddings`, one `VoyageAIContextualizedEmbedding` per value with `embeddings` and

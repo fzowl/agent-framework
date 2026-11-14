@@ -53,6 +53,7 @@ def make_response(vectors: list[list[float]], total_tokens: int = 4) -> Embeddin
 
 def make_client(*responses: Any, model: str | None = "voyage-4") -> tuple[VoyageAIEmbeddingClient, AsyncMock]:
     sdk = AsyncMock(spec=AsyncClient)
+    sdk.count_tokens.return_value = 1
     sdk.embed.side_effect = list(responses)
     return VoyageAIEmbeddingClient(model=model, client=sdk), sdk
 
@@ -178,48 +179,40 @@ async def test_inputs_over_the_request_limit_are_split_in_order_and_usage_is_sum
 
 async def test_requests_stay_within_the_models_token_ceiling() -> None:
     client, sdk = make_client(make_response([[0.1]] * 2), make_response([[0.1]]), model="voyage-4-large")
-    sdk.tokenize.return_value = [[0] * 50_000, [0] * 50_000, [0] * 50_000]
+    sdk.count_tokens.side_effect = [50_000, 50_000, 50_000]
 
     await client.get_embeddings(["a" * 50_000] * 3)
 
     assert [len(call.args[0]) for call in sdk.embed.await_args_list] == [2, 1]
 
 
-async def test_text_that_expands_when_tokenized_is_counted_by_the_tokenizer() -> None:
-    # U+0344 is two characters after Unicode normalization, so 50 KB of it tokenizes to well over 50K tokens.
-    client, sdk = make_client(make_response([[0.1]]), make_response([[0.1]]), model="voyage-4-large")
-    sdk.tokenize.return_value = [[0] * 75_000, [0] * 75_000]
-
-    await client.get_embeddings(["\u0344" * 25_000, "\u0344" * 25_000])
-
-    sdk.tokenize.assert_called_once()
-    assert [len(call.args[0]) for call in sdk.embed.await_args_list] == [1, 1]
-
-
 async def test_input_over_the_ceiling_on_its_own_gets_its_own_request() -> None:
     client, sdk = make_client(make_response([[0.1]]), make_response([[0.1]]), model="voyage-4-large")
-    sdk.tokenize.return_value = [[0] * 130_000, [0] * 10]
+    sdk.count_tokens.side_effect = [130_000, 10]
 
     await client.get_embeddings(["a" * 130_000, "b" * 10_000])
 
     assert [len(call.args[0]) for call in sdk.embed.await_args_list] == [1, 1]
 
 
-async def test_tokenizer_is_not_loaded_for_requests_far_below_the_ceiling() -> None:
+async def test_tokens_are_counted_for_every_call_to_a_model_with_a_ceiling() -> None:
     client, sdk = make_client(make_response([[0.1]]))
+    sdk.count_tokens.side_effect = [3]
+
     await client.get_embeddings(["short text"])
-    sdk.tokenize.assert_not_called()
+
+    sdk.count_tokens.assert_called_once_with(["short text"], "voyage-4")
 
 
 async def test_model_without_a_documented_ceiling_is_split_by_input_count_only() -> None:
     client, sdk = make_client(make_response([[0.1]]), model="voyage-code-4")
     await client.get_embeddings(["a" * 500_000])
-    sdk.tokenize.assert_not_called()
+    sdk.count_tokens.assert_not_called()
 
 
 async def test_tokenizer_failure_fails_the_call_instead_of_sending_unsplit_requests() -> None:
     client, sdk = make_client(model="voyage-4-large")
-    sdk.tokenize.side_effect = OSError("hub unreachable")
+    sdk.count_tokens.side_effect = OSError("hub unreachable")
 
     with pytest.raises(IntegrationException, match="could not be split by token count"):
         await client.get_embeddings(["a" * 150_000])
