@@ -70,6 +70,7 @@ SMOKE_IMPORTS: dict[str, tuple[str, ...]] = {
     "agent-framework-sql-server": ("agent_framework_sql_server:SqlServerStore",),
     "agent-framework-tools": ("agent_framework.tools:LocalShellTool",),
     "agent-framework-typesafe": ("agent_framework_typesafe:TypeSafeChatClient",),
+    "agent-framework-voyageai": ("agent_framework_voyageai:VoyageAIEmbeddingClient",),
 }
 
 

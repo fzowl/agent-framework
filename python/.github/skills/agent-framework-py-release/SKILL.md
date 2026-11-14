@@ -393,7 +393,7 @@ Contract:
   `agent_framework_hosting`, `agent_framework_hosting_a2a`, `agent_framework_hosting_mcp`,
   `agent_framework_hosting_responses`, `agent_framework_hosting_telegram`, `agent_framework_mongodb`,
   `agent_framework_nvidia`, `agent_framework_oracle`, `agent_framework_postgres`, `agent_framework_qdrant`,
-  `agent_framework_sql_server`, and `agent_framework_typesafe`. See their package READMEs and exported `__all__`;
+  `agent_framework_sql_server`, `agent_framework_typesafe`, and `agent_framework_voyageai`. See their package READMEs and exported `__all__`;
   the inventory test checks each selected public export. A new exception must also be reviewed in the consumer
   allowlist before release.
 

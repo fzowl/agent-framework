@@ -67,6 +67,7 @@ column records whether `pip install agent-framework` installs the workspace pack
 | `agent-framework-sql-server` | `python/packages/sql-server` | `alpha` | `no` |
 | `agent-framework-tools` | `python/packages/tools` | `beta` | `yes` |
 | `agent-framework-typesafe` | `python/packages/typesafe` | `alpha` | `no` |
+| `agent-framework-voyageai` | `python/packages/voyageai` | `alpha` | `no` |
 
 ## Deprecated / removed packages
 
